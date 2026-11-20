@@ -1,3 +1,5 @@
+import confidence
+from strategy import MIN_EDGE
 from decimal import Decimal, ROUND_CEILING
 import base64
 import forecast_test
@@ -74,6 +76,7 @@ def init():
             snap TEXT, actual TEXT, result TEXT, settled REAL, pnl REAL, epoch INTEGER,
             UNIQUE(account,ticker))""")
         c.execute("CREATE TABLE IF NOT EXISTS chart_cache(id INTEGER PRIMARY KEY, end INTEGER, forecast TEXT)")
+        confidence.init(c)
         forecast_test.init(c)
         if account(c) is None:
             new_session(c)
@@ -298,6 +301,13 @@ def record_account(c, a, m, close, spot, now, chart):
     snap["reason"] = reason
     if actual:
         actual["entry_rule"] = a["rule"]
+    if actual:
+        actual = confidence.screen(c, aid, m["ticker"], close, actual, actual["price"] + MIN_EDGE)
+        if actual is None:
+            reason = "Skipped after entry confidence adjustment"
+            snap["reason"] = reason
+        else:
+            confidence.filled(c, aid, m["ticker"], actual)
     encoded = json.dumps(actual) if actual else None
     c.execute("""INSERT INTO observations(account,ticker,opened,close,snap,actual,epoch)
                  VALUES(?,?,?,?,?,?,?)
@@ -342,6 +352,7 @@ def settle(aid, oid, result, value, now):
         if order:
             payout = order["n"] * (value if order["side"]=="YES" else 1-value)
         pnl = round(payout-order["paid"],6) if order else None
+        confidence.finish(c, aid, r["ticker"], result, now)
         c.execute("UPDATE observations SET settled=?,result=?,pnl=? WHERE id=?",(now,result,pnl,oid))
         if a["rule"] != ENTRY_RULE:
             # Settle any pre-upgrade fill against its retired ledger only.

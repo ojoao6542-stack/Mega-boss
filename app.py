@@ -14,6 +14,7 @@ from http.cookies import SimpleCookie, CookieError
 from datetime import datetime, timezone
 
 import engine
+import confidence
 import forecast_test
 from strategy import BLOCK, MIN_TRAIN
 
@@ -30,7 +31,7 @@ def trade(r):
                 entry_rule=o.get("entry_rule","Earlier version"),
                 entry_type="30-minute" if o.get("timed") else "Strategy",
                 contracts=o["n"],price=o["price"],fee=o["fee"],risk=o["paid"],
-                probability=round(o["confidence"],4),result=r["result"] or "OPEN",pnl=r["pnl"])
+                raw_probability=round(o.get("raw_confidence",o["confidence"]),4),probability=round(o["confidence"],4),result=r["result"] or "OPEN",pnl=r["pnl"])
 
 
 def stats(rows):
@@ -80,7 +81,7 @@ def snapshot():
             curve.append(round(curve[-1] + settled[0], 6))
         chart_results = c.execute("""SELECT pnl FROM observations WHERE account=? AND pnl IS NOT NULL
                                      AND json_extract(snap,'$.family')='candles_v1' ORDER BY settled,id""",(aid,)).fetchall()
-        return dict(session=a["session"], current_rule=stats([r for r in closed if r["entry_rule"]==engine.ENTRY_RULE]),forecast_test=forecast_test.summary(c,aid),chart_results=stats(chart_results), source=engine.price_source(),equity=curve,chart=json.loads(cached[0]) if cached else None,account=aid,cash=a["cash"],enabled=bool(a["enabled"]),status=a["reason"],age=ages,
+        return dict(entry_confidence=confidence.report(c,aid), session=a["session"], current_rule=stats([r for r in closed if r["entry_rule"]==engine.ENTRY_RULE]),forecast_test=forecast_test.summary(c,aid),chart_results=stats(chart_results), source=engine.price_source(),equity=curve,chart=json.loads(cached[0]) if cached else None,account=aid,cash=a["cash"],enabled=bool(a["enabled"]),status=a["reason"],age=ages,
                     btc=a["btc"],today=engine.daily(c,aid,time.time()),daily_limit=engine.DAILY,
                     cap=50,target=m["cap"],active=m["active_name"],seen=m["seen"],review=m["last_review"],
                     learning=(f"Forward test {m['epoch']} · {progress} of {BLOCK} markets"
@@ -187,7 +188,7 @@ class Handler(BaseHTTPRequestHandler):
                         JOIN opening_accounts a ON a.id=o.account
                         WHERE a.rule=? AND o.actual IS NOT NULL ORDER BY o.id""", (engine.ENTRY_RULE,))]
             out=io.StringIO()
-            fields="account market opened_utc side entry_type contracts price fee risk probability result pnl entry_rule".split()
+            fields="account market opened_utc side entry_type contracts price fee risk raw_probability probability result pnl entry_rule".split()
             writer=csv.DictWriter(out,fieldnames=fields)
             writer.writeheader()
             writer.writerows(rows)

@@ -48,3 +48,11 @@ python -m unittest -v
 ```
 
 [Kalshi public market data](https://docs.kalshi.com/getting_started/quick_start_market_data) · [Coinbase candles](https://docs.cdp.coinbase.com/api-reference/exchange-api/rest-api/products/get-product-candles) · [Render persistent disks](https://render.com/docs/disks)
+
+## Confidence at entry
+
+Each paper account tests its own forecasts starting with new eligible entries after this update. It records one otherwise eligible opportunity per market before the outcome is known and tracks the actual entry separately if a later quote qualifies. A fresh calibration begins with the raw forecast.
+
+After 30 settled opportunities, the bot fits a factor between zero and one using its own recent results. For a favored side, the adjusted forecast is 50% plus that factor times the original distance above 50%. A factor of 0.75 takes an 80% forecast to 72.5%. The candidate is frozen for the next 40 eligible outcomes. It takes effect only if Brier score improves by at least 0.005, at least 12 hypothetical entries qualify, and the adjusted entries show positive simulated P/L at least as high as the incumbent on the same first quotes, normalized to $20 risk each. Skipped entries count as zero in that comparison. A new round then begins. A rejected candidate cannot change the active adjustment.
+
+Entry checks use the validated probability and the bot's existing price, edge, timing and risk rules. The dashboard groups settled trades by the confidence used when the trade opened. Raw average, used average and win rate refer to the same trades. This entry calibration is separate from any chart-model training or timed forecast-accuracy panel. Older fills retain their original forecasts.
