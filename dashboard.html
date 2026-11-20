@@ -1,0 +1,145 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><title>BTC Opening Five</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#101a21;color:#f3f0e8;font:16px/1.5 Inter,-apple-system,BlinkMacSystemFont,sans-serif}main{max-width:900px;margin:auto;padding:32px 18px 60px}header,section{border-top:1px solid #41505a;padding:20px 0}header{border-top:4px solid #91e1b8}h1,h2,p{margin:0 0 10px}h1{font-size:clamp(28px,6vw,48px);line-height:1.15}h2{font-size:20px}small,th,label{color:#b4c4c8}.cards{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:18px 0}.card{border:1px solid #40505a;border-radius:8px;padding:12px}.card strong{display:block;font-size:23px;color:#a6efd0;font-variant-numeric:tabular-nums}button,a{font:inherit;color:#b6f2d6}button{border:1px solid #607d78;background:#20382f;padding:8px 14px;border-radius:6px;cursor:pointer}summary{cursor:pointer}table{border-collapse:collapse;width:100%;white-space:nowrap}td,th{padding:8px 10px;text-align:left;border-bottom:1px solid #35434c}th{font-weight:500}.scroll{overflow-x:auto}#error{color:#ffbca8}strong{font-variant-numeric:tabular-nums}details p{margin-top:10px}@media(max-width:600px){.cards{grid-template-columns:repeat(2,1fr)}main{padding-top:18px}}
+
+.plotbox{background:#15252d;border:1px solid #34464f;border-radius:12px;padding:14px;margin:10px 0 7px}
+.plotbox svg{width:100%;height:145px;display:block;touch-action:pan-y}
+.chartrow{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.chartrow h2{margin:0}.range button{font-size:13px;padding:5px 10px;background:transparent;border-color:#435b64;color:#becdd1}
+.range button[aria-pressed=true]{color:#102029;background:#b2e7da}
+.chartvalue{display:block;font-size:22px;line-height:1.2;font-weight:650;margin:4px 0}
+.plotbox output{font-size:13px;color:#bacbd0}
+.plotbox svg text{font:11px system-ui;fill:#afc4cb}
+</style></head><body><main>
+<header><small>KXBTC15M · Paper trading</small><h1>Bitcoin Opening Five</h1><p id="connection" role="status">Connecting to the worker…</p><div class="cards" id="cards"></div><p id="status"></p><small id="market"></small></header>
+<section aria-labelledby="comparison-title"><h2 id="comparison-title">Opening Five vs. V5</h2>
+<p id="comparison-status" role="status">Waiting for results</p>
+<div class="scroll"><table><thead><tr><th scope="col">Paper results</th><th scope="col">Opening Five</th><th scope="col">V5 reference</th></tr></thead>
+<tbody id="comparison"></tbody></table></div>
+<p><small>Each starts at $500, sees the same quotes and learns independently. V5 can also enter after minute five. P/L uses settled trades and excludes fees and slippage.</small></p>
+<a href="/trades.csv">Opening Five trades</a> · <a href="/v5-reference.csv">V5 reference trades</a></section>
+<section><div class="chartrow"><h2>Bitcoin price</h2><span class="range" aria-label="Chart time range"><button id="hour" aria-pressed="false">1h</button> <button id="three" aria-pressed="true">3h</button></span></div>
+<div class="plotbox"><strong class="chartvalue" id="btcvalue">—</strong><output id="btclegend">Waiting for closed candles</output><svg id="btcplot" role="img" aria-label="Bitcoin price from completed five-minute candles"></svg></div>
+<p id="chart"></p><small id="moves"></small></section>
+<section><h2>Paper account performance</h2><div class="plotbox"><strong class="chartvalue" id="eqvalue">—</strong><output id="eqlegend">Starting balance</output><svg id="eqplot" role="img" aria-label="Paper account balance by settled trade"></svg></div><small>Starts at $500. Updates when a trade settles.</small></section>
+<section><h2>Open positions</h2><p id="exposure"></p><div id="positions"></div></section>
+<section><h2>Chart strategy</h2><p id="chartresults"></p><small>Entries open in minutes 0–5 at an ask of 50¢ or higher. The forecast for the chosen side must exceed its ask by at least 12¢.</small></section>
+<section><h2>Forecast accuracy</h2><p id="forecast-progress"></p><p id="forecast-scores"></p><small>First valid forecast with 4:30–5:00 left. Lower Brier scores indicate better forecasts. Market uses the ask for the model’s favored side.</small><p><a href="/forecasts.csv">Download forecast history</a></p></section>
+<section><h2>Model and risk</h2><p id="learning"></p><p id="cap"></p><small id="review"></small></section>
+<section><small>Opening five minutes · 50¢ floor</small><p id="rule-results"></p><h2>Daily trades</h2><label>Entry date (New Orleans) <select id="trade-day"></select></label><p id="day-profit"></p><div class="scroll"><table><thead><tr><th>#</th><th>Opened</th><th>Side</th><th>Entry</th><th>Forecast</th><th>At risk</th><th>Result</th><th>P/L</th></tr></thead><tbody id="trades"></tbody></table></div><p id="empty"></p><a href="/trades.csv">Download trades, including archived accounts (CSV)</a></section>
+<section><h2>Account controls</h2><p id="account"></p><button id="toggle" disabled>Pause</button> <button id="refresh">Refresh</button><p id="error" role="alert"></p><details><summary>Archive and reset</summary><p>Start both paper accounts at $500 and restart both models. Previous trades stay in the CSV. Pause first if a market is pending.</p><button id="reset" disabled>Archive and restart</button></details></section>
+</main><script>
+const el=id=>document.getElementById(id), usd=n=>n.toLocaleString("en-US",{style:"currency",currency:"USD"}), pct=n=>n==null?"—":n+"%";let state;
+let hours=3;
+const clock=ts=>new Date(ts*1000).toLocaleTimeString([], {hour:"numeric",minute:"2-digit"});
+function updateDailyTrades(days, account) {
+  const selector = el("trade-day");
+  const previous = selector.dataset.account === String(account) ? selector.value : "";
+  const dates = Object.keys(days).sort().reverse();
+  const summaries = new Map(dates.map(day => {
+    const settled = days[day].filter(trade => trade.result !== "OPEN" && Number.isFinite(trade.pnl));
+    const net = settled.reduce((total, trade) => total + trade.pnl, 0);
+    const cents = Math.round((Math.abs(net) + Number.EPSILON) * 100);
+    const amount = (cents && net < 0 ? "−" : cents ? "+" : "") + usd(cents / 100);
+    return [day, {amount, settled: settled.length}];
+  }));
+  selector.replaceChildren(...dates.map(day => {
+    const count = days[day].length;
+    return new Option(day + " · " + count + (count === 1 ? " trade" : " trades") + " · " + summaries.get(day).amount, day);
+  }));
+  selector.dataset.account = String(account);
+  selector.value = dates.includes(previous) ? previous : dates[0];
+  function display() {
+    const entries = days[selector.value] || [];
+    const summary = summaries.get(selector.value);
+    el("day-profit").textContent = "Net paper P/L: " + summary.amount + " · " + summary.settled + " settled · " + (entries.length - summary.settled) + " open";
+    rows("trades",entries.map((r,i)=>[i+1,r.local_time,r.side+(r.entry_type==="30-minute"?" · 30-min":""),(100*r.price).toFixed(2)+"¢",Math.round(100*r.probability)+"%",usd(r.risk),r.result,r.pnl===null?"—":usd(r.pnl)]).reverse());
+    el("empty").textContent = entries.length ? "" : "No trades opened on this day.";
+  }
+  selector.onchange = display;
+  display();
+}
+function draw(id, values, labels, color, step, empty){
+  const svg=el(id+"plot"), value=el(id+"value"), legend=el(id+"legend");
+  svg.replaceChildren();svg.onpointermove=svg.onpointerdown=svg.onpointerleave=null;
+  if(!values.length){svg.style.display="none";value.textContent="—";legend.textContent=empty;return}
+  svg.style.display="block";
+  const w=Math.max(230,svg.clientWidth), h=145, left=59,right=w-7,top=13,bottom=118;
+  svg.setAttribute("viewBox",`0 0 ${w} ${h}`);
+  function add(tag, attrs, content){
+    const node=document.createElementNS("http://www.w3.org/2000/svg",tag);
+    Object.entries(attrs).forEach(([k,v])=>node.setAttribute(k,v));
+    if(content!==undefined)node.textContent=content;svg.append(node);return node;
+  }
+  let lo=Infinity,hi=-Infinity;
+  for(const v of values){lo=Math.min(lo,v);hi=Math.max(hi,v)}
+  const pad=Math.max((hi-lo)*0.08,step?0.5:1);lo-=pad;hi+=pad;
+  const x=i=>left+(right-left)*i/Math.max(1,values.length-1);
+  const y=v=>bottom-(bottom-top)*(v-lo)/(hi-lo);
+  for(let i=0;i<3;i++){
+    const v=lo+(hi-lo)*i/2;
+    add("line",{x1:left,x2:right,y1:y(v),y2:y(v),stroke:"#395058"});
+    add("text",{x:left-6,y:y(v)+4,"text-anchor":"end"},"$"+v.toLocaleString(undefined,{maximumFractionDigits:hi-lo<3?1:0}));
+  }
+  let line="M"+x(0)+" "+y(values[0]);
+  for(let i=1;i<values.length;i++)line+=step?" H"+x(i)+" V"+y(values[i]):" L"+x(i)+" "+y(values[i]);
+  add("path",{d:line+" V"+bottom+" H"+left+" Z",fill:color,opacity:0.08});
+  add("path",{d:line,stroke:color,"stroke-width":2.3,fill:"none","stroke-linejoin":"round"});
+  add("text",{x:left,y:139},labels[0]);
+  if(values.length>1)add("text",{x:right,y:139,"text-anchor":"end"},labels[values.length-1]);
+  const dot=add("circle",{r:4,fill:color});
+  function focus(i){dot.setAttribute("cx",x(i));dot.setAttribute("cy",y(values[i]));value.textContent=usd(values[i]);legend.textContent=labels[i]}
+  focus(values.length-1);
+  function select(event){const at=(event.clientX-svg.getBoundingClientRect().left-left)/(right-left);
+    focus(Math.max(0,Math.min(values.length-1,Math.round(at*(values.length-1)))))}
+  svg.onpointermove=svg.onpointerdown=select;svg.onpointerleave=()=>focus(values.length-1);
+}
+function graphs(s){
+  const all=s.chart?.prices||[], values=all.slice(-(hours*12+1));
+  const labels=values.map((_,i)=>clock(s.chart.end-(values.length-1-i)*300));
+  draw("btc",values,labels,"#79dfd4",false,"Waiting for current five-minute candles");
+  const equity=s.equity||[];
+  draw("eq",equity,equity.map((_,i)=>i?"Trade "+i:"Start"),"#f1c278",true,"Waiting for account history");
+  el("hour").setAttribute("aria-pressed",String(hours===1));el("three").setAttribute("aria-pressed",String(hours===3));
+}
+el("hour").onclick=()=>{hours=1;if(state)graphs(state)};
+el("three").onclick=()=>{hours=3;if(state)graphs(state)};
+window.addEventListener("resize",()=>{if(state)graphs(state)});
+function rows(id,values){el(id).replaceChildren(...values.map(row=>{let tr=document.createElement("tr");for(let value of row){let td=document.createElement("td");td.textContent=value;tr.append(td)}return tr}))}
+function compare(performance) {
+  const {opening, v5} = performance;
+  const difference = opening.net - v5.net;
+  const settled = opening.count + v5.count;
+  el("comparison-status").textContent = !settled ? "Waiting for the first settlement" :
+    difference === 0 ? "Both have the same realized paper P/L" :
+    (difference > 0 ? "Opening Five leads by " : "V5 leads by ") + usd(Math.abs(difference)) + " in realized paper P/L";
+  const money = value => value == null ? "—" : usd(value);
+  rows("comparison", [
+    ["Realized P/L", usd(opening.net), usd(v5.net)],
+    ["Settled trades", opening.count, v5.count],
+    ["Win rate", pct(opening.rate), pct(v5.rate)],
+    ["Profit per trade", money(opening.per_trade), money(v5.per_trade)],
+    ["Max drawdown", usd(opening.drawdown), usd(v5.drawdown)],
+    ["Open risk", usd(opening.reserved), usd(v5.reserved)]
+  ]);
+}
+function paint(s){state=s;compare(s.comparison);graphs(s);el("connection").textContent=(s.age===null?"Worker starting":s.age>50?"Worker heartbeat overdue":"Worker online")+" · "+(s.enabled?"Trading enabled":"Paused");
+el("cards").replaceChildren(...[["Available paper cash",usd(s.cash)],["Realized P/L",usd(s.all.net)],["Win rate",pct(s.all.rate)],["Settled trades",s.all.count]].map(([k,v])=>{let d=document.createElement("div");d.className="card";let l=document.createElement("small"),b=document.createElement("strong");l.textContent=k;b.textContent=v;d.append(l,b);return d}));
+el("chart").textContent=s.chart?"Near-term direction: "+s.chart.direction:"Waiting for current three-hour chart";
+el("moves").textContent=s.chart?s.chart.changes.map((v,i)=>["15 min","1 hour","3 hours"][i]+": "+(v>0?"+":"")+v+"%").join(" · "):"";
+el("status").textContent=s.status;el("market").textContent=[s.btc?"BTC spot "+usd(s.btc):null,s.age===null?null:"Heartbeat "+s.age+"s ago"].filter(Boolean).join(" · ");
+el("exposure").textContent=s.open_count+" of "+s.max_positions+" slots used · "+usd(s.reserved)+" at risk";el("positions").replaceChildren(...s.positions.map(r=>{let p=document.createElement("p");p.textContent=r.market+" · "+r.side+" · "+usd(r.risk)+" at risk";return p}));
+el("chartresults").textContent=s.chart_results.count+" settled chart trades · "+usd(s.chart_results.net)+" paper P/L";
+el("rule-results").textContent=s.current_rule.count+" settled under this rule · "+pct(s.current_rule.rate)+" win rate · "+usd(s.current_rule.net)+" paper P/L";
+const test=s.forecast_test;
+el("forecast-progress").textContent=test.watched+"/100 markets watched · "+test.captured+" forecasts captured · "+test.scored+" settled and scored";
+const labels={model_yes:"Original",market_yes:"Market",blend_yes:"50/50 blend"};
+el("forecast-scores").textContent=Object.entries(labels).map(([key,label])=>label+" "+(test.scores[key]?.toFixed(3)??"—")).join(" · ");
+el("learning").textContent="Shadow calibration: "+s.active+" · "+s.learning;el("cap").textContent="Paper trade range $20–"+usd(s.cap)+" · Current sizing target "+usd(s.target)+" · Daily loss limit "+usd(s.daily_limit)+" · Today (UTC) "+usd(s.today);
+let r=s.review;el("review").textContent=r?"Round "+r.round+" · "+(r.promoted?"Candidate promoted":"Current model retained")+" · Candidate paper P/L "+usd(r.rival.net)+" vs "+usd(r.rival.reference_net)+" at equal $20 budgets.":"The first comparison uses 40 new settled markets after 30 training markets.";
+updateDailyTrades(s.daily_trades,s.account);
+el("account").textContent="Session "+s.session+" · "+s.archives+" archived";el("toggle").textContent=s.enabled?"Pause entries":"Resume entries";el("toggle").disabled=false;el("reset").disabled=false}
+async function refresh(){try{let res=await fetch("/state");if(res.status===401){location.replace("/login");return}if(!res.ok)throw Error();paint(await res.json())}catch{el("connection").textContent="Dashboard disconnected · reconnecting"}}
+async function act(action){try{let res=await fetch("/control",{method:"POST",headers:{"Content-Type":"application/json","X-Opening5-Control":"1"},body:JSON.stringify({action,account:state.account})});el("error").textContent=res.ok?"":await res.text();await refresh()}catch{el("error").textContent="Could not save. Refresh and try again."}}
+el("toggle").onclick=()=>act(state.enabled?"pause":"resume");el("refresh").onclick=refresh;el("reset").onclick=()=>{if(confirm("Archive this comparison and restart both paper accounts at $500 each?"))act("reset")};refresh();setInterval(refresh,10000);
+</script></body></html>

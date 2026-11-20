@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: kalshi-btc-opening-five-paper
+    runtime: python
+    plan: starter
+    buildCommand: python -m compileall -q app.py engine.py strategy.py forecast_test.py
+    startCommand: python app.py
+    healthCheckPath: /health
+    disk:
+      name: opening-five-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: OPENING5_DB_PATH
+        value: /var/data/opening5.sqlite3
+      - key: DASHBOARD_PASSWORD
+        generateValue: true
+      - key: DAILY_LOSS_LIMIT
+        value: "250"
+      - key: HOST
+        value: 0.0.0.0
