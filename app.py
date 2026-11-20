@@ -41,7 +41,8 @@ def stats(rows):
         peak=max(peak,curve)
         drawdown=max(drawdown,peak-curve)
     return dict(count=len(rows),wins=wins,net=round(curve,2),drawdown=round(drawdown,2),
-                rate=round(100*wins/len(rows),1) if rows else None)
+                rate=round(100*wins/len(rows),1) if rows else None,
+                per_trade=round(curve/len(rows),2) if rows else None)
 
 
 from zoneinfo import ZoneInfo
@@ -56,20 +57,6 @@ def daily_trades(rows):
         days.setdefault(opened.date().isoformat(), []).append(
             dict(row, local_time=opened.strftime("%I:%M %p %Z")))
     return days
-
-
-def comparison(c, session):
-    result = {}
-    for portfolio in engine.accounts(c, session):
-        aid = portfolio["id"]
-        settled = c.execute("""SELECT pnl FROM observations WHERE account=? AND pnl IS NOT NULL
-                               ORDER BY settled,id""", (aid,)).fetchall()
-        performance = stats(settled)
-        performance["per_trade"] = round(sum(row["pnl"] for row in settled) / len(settled), 2) if settled else None
-        performance["open"], performance["reserved"] = engine.open_risk(c, aid)
-        key = "opening" if portfolio["rule"] == engine.ENTRY_RULE else "v5"
-        result[key] = performance
-    return result
 
 
 def snapshot():
@@ -87,18 +74,19 @@ def snapshot():
         ages=None if a["heartbeat"] is None else int(time.time()-a["heartbeat"])
         cached=c.execute("SELECT forecast FROM chart_cache WHERE id=1 AND end=?", (int(time.time()//300)*300,)).fetchone()
         curve = [500.0]
-        for settled in c.execute("""SELECT pnl FROM observations WHERE account=? AND actual IS NOT NULL
-                                    AND result IS NOT NULL ORDER BY settled,id""", (aid,)):
+        settlements = c.execute("""SELECT pnl FROM observations WHERE account=? AND actual IS NOT NULL
+                                   AND result IS NOT NULL ORDER BY settled,id""", (aid,)).fetchall()
+        for settled in settlements:
             curve.append(round(curve[-1] + settled[0], 6))
         chart_results = c.execute("""SELECT pnl FROM observations WHERE account=? AND pnl IS NOT NULL
                                      AND json_extract(snap,'$.family')='candles_v1' ORDER BY settled,id""",(aid,)).fetchall()
-        return dict(comparison=comparison(c,a["session"]), session=a["session"], current_rule=stats([r for r in closed if r["entry_rule"]==engine.ENTRY_RULE]),forecast_test=forecast_test.summary(c,aid),chart_results=stats(chart_results), source=engine.price_source(),equity=curve,chart=json.loads(cached[0]) if cached else None,account=aid,cash=a["cash"],enabled=bool(a["enabled"]),status=a["reason"],age=ages,
+        return dict(session=a["session"], current_rule=stats([r for r in closed if r["entry_rule"]==engine.ENTRY_RULE]),forecast_test=forecast_test.summary(c,aid),chart_results=stats(chart_results), source=engine.price_source(),equity=curve,chart=json.loads(cached[0]) if cached else None,account=aid,cash=a["cash"],enabled=bool(a["enabled"]),status=a["reason"],age=ages,
                     btc=a["btc"],today=engine.daily(c,aid,time.time()),daily_limit=engine.DAILY,
                     cap=50,target=m["cap"],active=m["active_name"],seen=m["seen"],review=m["last_review"],
                     learning=(f"Forward test {m['epoch']} · {progress} of {BLOCK} markets"
                               if m["epoch"] else f"Initial training · {m['seen']} of {MIN_TRAIN} markets"),
                     positions=positions, open_count=open_count, max_positions=engine.MAX_POSITIONS,
-                    reserved=reserved, all=stats(closed),
+                    reserved=reserved, all=stats(settlements),
                     recent=rows[-30:][::-1],daily_trades=daily_trades(rows),archives=a["session"]-1)
 
 
@@ -108,12 +96,12 @@ def control(action, expected):
         if a["id"]!=expected:
             return 409,"Account has changed. Refresh the dashboard."
         if action=="reset":
-            if any(engine.pending(c, row["id"]) for row in engine.accounts(c, a["session"])):
+            if engine.pending(c, a["id"]):
                 return 409,"Pause and wait for the tracked market to settle before resetting."
             engine.new_session(c)
         elif action in ("pause","resume"):
-            c.execute("UPDATE opening_accounts SET enabled=?,reason=? WHERE session=?",
-                      (action=="resume","Waiting for next scan" if action=="resume" else "Paused",a["session"]))
+            c.execute("UPDATE opening_accounts SET enabled=?,reason=? WHERE id=?",
+                      (action=="resume","Waiting for next scan" if action=="resume" else "Paused",a["id"]))
         else:
             return 404,"Unknown control"
     return 200,"Saved"
@@ -193,19 +181,17 @@ class Handler(BaseHTTPRequestHandler):
             with engine.db() as c:
                 payload = forecast_test.export(c,engine.account(c)["id"])
             return self.reply(200,payload,"text/csv",{"Content-Disposition":'attachment; filename="forecasts.csv"'})
-        if path in ("/trades.csv", "/v5-reference.csv"):
+        if path=="/trades.csv":
             with engine.db() as c:
-                rule = engine.ENTRY_RULE if path == "/trades.csv" else engine.REFERENCE_RULE
                 rows = [trade(r) for r in c.execute("""SELECT o.* FROM observations o
                         JOIN opening_accounts a ON a.id=o.account
-                        WHERE a.rule=? AND o.actual IS NOT NULL ORDER BY o.id""", (rule,))]
+                        WHERE a.rule=? AND o.actual IS NOT NULL ORDER BY o.id""", (engine.ENTRY_RULE,))]
             out=io.StringIO()
             fields="account market opened_utc side entry_type contracts price fee risk probability result pnl entry_rule".split()
             writer=csv.DictWriter(out,fieldnames=fields)
             writer.writeheader()
             writer.writerows(rows)
-            filename = "opening5_trades.csv" if path == "/trades.csv" else "v5_reference_trades.csv"
-            return self.reply(200,out.getvalue().encode(),"text/csv",{"Content-Disposition":f'attachment; filename="{filename}"'})
+            return self.reply(200,out.getvalue().encode(),"text/csv",{"Content-Disposition":'attachment; filename="opening5_trades.csv"'})
         self.reply(404,b"Not found")
 
     def do_POST(self):

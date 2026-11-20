@@ -12,22 +12,16 @@
 .plotbox svg text{font:11px system-ui;fill:#afc4cb}
 </style></head><body><main>
 <header><small>KXBTC15M · Paper trading</small><h1>Bitcoin Opening Five</h1><p id="connection" role="status">Connecting to the worker…</p><div class="cards" id="cards"></div><p id="status"></p><small id="market"></small></header>
-<section aria-labelledby="comparison-title"><h2 id="comparison-title">Opening Five vs. V5</h2>
-<p id="comparison-status" role="status">Waiting for results</p>
-<div class="scroll"><table><thead><tr><th scope="col">Paper results</th><th scope="col">Opening Five</th><th scope="col">V5 reference</th></tr></thead>
-<tbody id="comparison"></tbody></table></div>
-<p><small>Each starts at $500, sees the same quotes and learns independently. V5 can also enter after minute five. P/L uses settled trades and excludes fees and slippage.</small></p>
-<a href="/trades.csv">Opening Five trades</a> · <a href="/v5-reference.csv">V5 reference trades</a></section>
 <section><div class="chartrow"><h2>Bitcoin price</h2><span class="range" aria-label="Chart time range"><button id="hour" aria-pressed="false">1h</button> <button id="three" aria-pressed="true">3h</button></span></div>
 <div class="plotbox"><strong class="chartvalue" id="btcvalue">—</strong><output id="btclegend">Waiting for closed candles</output><svg id="btcplot" role="img" aria-label="Bitcoin price from completed five-minute candles"></svg></div>
 <p id="chart"></p><small id="moves"></small></section>
-<section><h2>Paper account performance</h2><div class="plotbox"><strong class="chartvalue" id="eqvalue">—</strong><output id="eqlegend">Starting balance</output><svg id="eqplot" role="img" aria-label="Paper account balance by settled trade"></svg></div><small>Starts at $500. Updates when a trade settles.</small></section>
+<section><h2>Paper account performance</h2><div class="plotbox"><strong class="chartvalue" id="eqvalue">—</strong><output id="eqlegend">Starting balance</output><svg id="eqplot" role="img" aria-label="Paper account balance by settled trade"></svg></div><small>Starts at $500. Paper P/L excludes fees and slippage.</small><p id="performance-details"></p></section>
 <section><h2>Open positions</h2><p id="exposure"></p><div id="positions"></div></section>
 <section><h2>Chart strategy</h2><p id="chartresults"></p><small>Entries open in minutes 0–5 at an ask of 50¢ or higher. The forecast for the chosen side must exceed its ask by at least 12¢.</small></section>
 <section><h2>Forecast accuracy</h2><p id="forecast-progress"></p><p id="forecast-scores"></p><small>First valid forecast with 4:30–5:00 left. Lower Brier scores indicate better forecasts. Market uses the ask for the model’s favored side.</small><p><a href="/forecasts.csv">Download forecast history</a></p></section>
 <section><h2>Model and risk</h2><p id="learning"></p><p id="cap"></p><small id="review"></small></section>
 <section><small>Opening five minutes · 50¢ floor</small><p id="rule-results"></p><h2>Daily trades</h2><label>Entry date (New Orleans) <select id="trade-day"></select></label><p id="day-profit"></p><div class="scroll"><table><thead><tr><th>#</th><th>Opened</th><th>Side</th><th>Entry</th><th>Forecast</th><th>At risk</th><th>Result</th><th>P/L</th></tr></thead><tbody id="trades"></tbody></table></div><p id="empty"></p><a href="/trades.csv">Download trades, including archived accounts (CSV)</a></section>
-<section><h2>Account controls</h2><p id="account"></p><button id="toggle" disabled>Pause</button> <button id="refresh">Refresh</button><p id="error" role="alert"></p><details><summary>Archive and reset</summary><p>Start both paper accounts at $500 and restart both models. Previous trades stay in the CSV. Pause first if a market is pending.</p><button id="reset" disabled>Archive and restart</button></details></section>
+<section><h2>Account controls</h2><p id="account"></p><button id="toggle" disabled>Pause</button> <button id="refresh">Refresh</button><p id="error" role="alert"></p><details><summary>Archive and reset</summary><p>Start a fresh $500 paper account and restart learning. Previous trades stay in the CSV. Pause first if a market is pending.</p><button id="reset" disabled>Archive and restart</button></details></section>
 </main><script>
 const el=id=>document.getElementById(id), usd=n=>n.toLocaleString("en-US",{style:"currency",currency:"USD"}), pct=n=>n==null?"—":n+"%";let state;
 let hours=3;
@@ -106,25 +100,9 @@ el("hour").onclick=()=>{hours=1;if(state)graphs(state)};
 el("three").onclick=()=>{hours=3;if(state)graphs(state)};
 window.addEventListener("resize",()=>{if(state)graphs(state)});
 function rows(id,values){el(id).replaceChildren(...values.map(row=>{let tr=document.createElement("tr");for(let value of row){let td=document.createElement("td");td.textContent=value;tr.append(td)}return tr}))}
-function compare(performance) {
-  const {opening, v5} = performance;
-  const difference = opening.net - v5.net;
-  const settled = opening.count + v5.count;
-  el("comparison-status").textContent = !settled ? "Waiting for the first settlement" :
-    difference === 0 ? "Both have the same realized paper P/L" :
-    (difference > 0 ? "Opening Five leads by " : "V5 leads by ") + usd(Math.abs(difference)) + " in realized paper P/L";
-  const money = value => value == null ? "—" : usd(value);
-  rows("comparison", [
-    ["Realized P/L", usd(opening.net), usd(v5.net)],
-    ["Settled trades", opening.count, v5.count],
-    ["Win rate", pct(opening.rate), pct(v5.rate)],
-    ["Profit per trade", money(opening.per_trade), money(v5.per_trade)],
-    ["Max drawdown", usd(opening.drawdown), usd(v5.drawdown)],
-    ["Open risk", usd(opening.reserved), usd(v5.reserved)]
-  ]);
-}
-function paint(s){state=s;compare(s.comparison);graphs(s);el("connection").textContent=(s.age===null?"Worker starting":s.age>50?"Worker heartbeat overdue":"Worker online")+" · "+(s.enabled?"Trading enabled":"Paused");
+function paint(s){state=s;graphs(s);el("connection").textContent=(s.age===null?"Worker starting":s.age>50?"Worker heartbeat overdue":"Worker online")+" · "+(s.enabled?"Trading enabled":"Paused");
 el("cards").replaceChildren(...[["Available paper cash",usd(s.cash)],["Realized P/L",usd(s.all.net)],["Win rate",pct(s.all.rate)],["Settled trades",s.all.count]].map(([k,v])=>{let d=document.createElement("div");d.className="card";let l=document.createElement("small"),b=document.createElement("strong");l.textContent=k;b.textContent=v;d.append(l,b);return d}));
+el("performance-details").textContent="Average P/L per settled trade: "+(s.all.per_trade===null?"—":usd(s.all.per_trade))+" · Maximum drawdown: "+usd(s.all.drawdown);
 el("chart").textContent=s.chart?"Near-term direction: "+s.chart.direction:"Waiting for current three-hour chart";
 el("moves").textContent=s.chart?s.chart.changes.map((v,i)=>["15 min","1 hour","3 hours"][i]+": "+(v>0?"+":"")+v+"%").join(" · "):"";
 el("status").textContent=s.status;el("market").textContent=[s.btc?"BTC spot "+usd(s.btc):null,s.age===null?null:"Heartbeat "+s.age+"s ago"].filter(Boolean).join(" · ");
@@ -133,13 +111,13 @@ el("chartresults").textContent=s.chart_results.count+" settled chart trades · "
 el("rule-results").textContent=s.current_rule.count+" settled under this rule · "+pct(s.current_rule.rate)+" win rate · "+usd(s.current_rule.net)+" paper P/L";
 const test=s.forecast_test;
 el("forecast-progress").textContent=test.watched+"/100 markets watched · "+test.captured+" forecasts captured · "+test.scored+" settled and scored";
-const labels={model_yes:"Original",market_yes:"Market",blend_yes:"50/50 blend"};
+const labels={model_yes:"Opening Five",market_yes:"Market",blend_yes:"50/50 blend"};
 el("forecast-scores").textContent=Object.entries(labels).map(([key,label])=>label+" "+(test.scores[key]?.toFixed(3)??"—")).join(" · ");
 el("learning").textContent="Shadow calibration: "+s.active+" · "+s.learning;el("cap").textContent="Paper trade range $20–"+usd(s.cap)+" · Current sizing target "+usd(s.target)+" · Daily loss limit "+usd(s.daily_limit)+" · Today (UTC) "+usd(s.today);
-let r=s.review;el("review").textContent=r?"Round "+r.round+" · "+(r.promoted?"Candidate promoted":"Current model retained")+" · Candidate paper P/L "+usd(r.rival.net)+" vs "+usd(r.rival.reference_net)+" at equal $20 budgets.":"The first comparison uses 40 new settled markets after 30 training markets.";
+let r=s.review;el("review").textContent=r?"Round "+r.round+" · "+(r.promoted?"Candidate promoted":"Current model retained")+" · Candidate "+usd(r.rival.net)+" · Current model at review "+usd(r.rival.reference_net)+" · $20 test budgets.":"The first comparison uses 40 new settled markets after 30 training markets.";
 updateDailyTrades(s.daily_trades,s.account);
 el("account").textContent="Session "+s.session+" · "+s.archives+" archived";el("toggle").textContent=s.enabled?"Pause entries":"Resume entries";el("toggle").disabled=false;el("reset").disabled=false}
 async function refresh(){try{let res=await fetch("/state");if(res.status===401){location.replace("/login");return}if(!res.ok)throw Error();paint(await res.json())}catch{el("connection").textContent="Dashboard disconnected · reconnecting"}}
 async function act(action){try{let res=await fetch("/control",{method:"POST",headers:{"Content-Type":"application/json","X-Opening5-Control":"1"},body:JSON.stringify({action,account:state.account})});el("error").textContent=res.ok?"":await res.text();await refresh()}catch{el("error").textContent="Could not save. Refresh and try again."}}
-el("toggle").onclick=()=>act(state.enabled?"pause":"resume");el("refresh").onclick=refresh;el("reset").onclick=()=>{if(confirm("Archive this comparison and restart both paper accounts at $500 each?"))act("reset")};refresh();setInterval(refresh,10000);
+el("toggle").onclick=()=>act(state.enabled?"pause":"resume");el("refresh").onclick=refresh;el("reset").onclick=()=>{if(confirm("Archive this Opening Five account and restart at $500?"))act("reset")};refresh();setInterval(refresh,10000);
 </script></body></html>

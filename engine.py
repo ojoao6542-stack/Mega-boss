@@ -18,7 +18,6 @@ from urllib.request import Request, urlopen
 from strategy import BLOCK, MIN_TRAIN, assess, chart_forecast, chart_side, chart_signal, cost, entry, gains, probability, update
 
 ENTRY_RULE = "Opening five minutes, 50-cent floor"
-REFERENCE_RULE = "V5 full window, 50-cent floor"
 
 API = "https://external-api.kalshi.com/trade-api/v2"
 COINBASE = "https://api.exchange.coinbase.com/products/BTC-USD/ticker"
@@ -57,7 +56,7 @@ def db(write=False):
 
 def initial():
     return dict(seen=0, online=[0.0]*5, active=None, frozen=None, epoch=0, cap=20,
-                family="candles_v1", active_name="V5 chart forecast", last_review=None)
+                family="candles_v1", active_name="Opening Five chart forecast", last_review=None)
 
 
 def init():
@@ -78,22 +77,26 @@ def init():
         forecast_test.init(c)
         if account(c) is None:
             new_session(c)
+        # Keep existing ledgers and model weights when upgrading a running service.
+        c.execute("UPDATE opening_accounts SET enabled=0 WHERE rule<>? AND enabled<>0", (ENTRY_RULE,))
+        c.execute("""UPDATE opening_accounts SET model=json_set(model,'$.active_name',?)
+                     WHERE rule=? AND json_extract(model,'$.active_name')=?""",
+                  ("Opening Five chart forecast", ENTRY_RULE, "V5 chart forecast"))
+        c.execute("""UPDATE opening_accounts SET model=json_remove(model,
+                     '$.last_review.active_vs_baseline','$.last_review.rival_vs_baseline')
+                     WHERE rule=? AND json_type(model,'$.last_review.active_vs_baseline') IS NOT NULL""",
+                  (ENTRY_RULE,))
 
 
 def new_session(c):
     session = c.execute("SELECT COALESCE(MAX(session), 0) + 1 FROM opening_accounts").fetchone()[0]
-    for rule in (ENTRY_RULE, REFERENCE_RULE):
-        c.execute("INSERT INTO opening_accounts(session,rule,model) VALUES(?,?,?)",
-                  (session, rule, json.dumps(initial())))
+    c.execute("INSERT INTO opening_accounts(session,rule,model) VALUES(?,?,?)",
+              (session, ENTRY_RULE, json.dumps(initial())))
 
 
 def account(c):
     return c.execute("SELECT * FROM opening_accounts WHERE rule=? ORDER BY session DESC LIMIT 1",
                      (ENTRY_RULE,)).fetchone()
-
-
-def accounts(c, session):
-    return c.execute("SELECT * FROM opening_accounts WHERE session=? ORDER BY id", (session,)).fetchall()
 
 
 def daily(c, aid, now):
@@ -227,16 +230,15 @@ def record(aid, m, close, spot, now, chart):
     with db(True) as c:
         current = account(c)
         if aid == current["id"] and current["enabled"]:
-            for portfolio in accounts(c, current["session"]):
-                record_account(c, portfolio, m, close, spot, now, chart)
+            record_account(c, current, m, close, spot, now, chart)
 
 
 def record_account(c, a, m, close, spot, now, chart):
     aid = a["id"]
     remaining = close - now
-    if not 60 < remaining <= 900 or not a["enabled"]:
+    if not 60 < remaining <= 900 or not a["enabled"] or a["rule"] != ENTRY_RULE:
         return
-    if a["rule"] == ENTRY_RULE and forecast_test.due(c, aid, m["ticker"], close, now):
+    if forecast_test.due(c, aid, m["ticker"], close, now):
         q = quotes(m)
         strike = float(m["floor_strike"])
         pred = chart_signal(chart, spot, strike, remaining) if (
@@ -257,7 +259,7 @@ def record_account(c, a, m, close, spot, now, chart):
     strike = float(m["floor_strike"])
     source = price_source()
     forecast = None
-    if a["rule"] == ENTRY_RULE and remaining <= 600:
+    if remaining <= 600:
         reason = "Opening five-minute window has closed for this market"
     elif q is None:
         reason = "Waiting for valid Kalshi quotes and depth with a spread of 10¢ or less"
@@ -280,7 +282,7 @@ def record_account(c, a, m, close, spot, now, chart):
         count, reserved = open_risk(c, aid)
         available = min(50, a["cash"], DAILY + daily(c,aid,now) - reserved)
         allowed = (side,) if side else ()
-        for label, weights in (("base", None), ("active", model["active"]), ("rival", model["frozen"])):
+        for label, weights in (("active", model["active"]), ("rival", model["frozen"])):
             prob = probability(base, weights, x)
             snap[label] = prob
             snap[label+"_order"] = sized_order(prob,q,20,available,allowed) if count < MAX_POSITIONS else None
@@ -318,16 +320,12 @@ def learn(c, aid, model, snap, yes):
             return
         rows = [dict(json.loads(r["snap"]), yes=int(r["result"]=="YES")) for r in raw]
         rival = assess(rows,"rival","active")
-        incumbent = assess(rows,"active","base")
-        rival_base = assess(rows,"rival","base")
-        promoted = rival["passed"] and rival_base["passed"]
+        promoted = rival["passed"]
         if promoted:
             model["active"] = model["frozen"]
             model["active_name"] = f"Validated model {model['epoch']}"
-        validated = promoted or incumbent["passed"]
-        model["cap"] = min(50, model["cap"] + 10) if validated else 20
-        model["last_review"] = dict(round=model["epoch"], promoted=promoted,
-                                    rival=rival, active_vs_baseline=incumbent, rival_vs_baseline=rival_base)
+        model["cap"] = min(50, model["cap"] + 10) if promoted else 20
+        model["last_review"] = dict(round=model["epoch"], promoted=promoted, rival=rival)
     if model["seen"] >= MIN_TRAIN:
         model["frozen"] = model["online"][:]
         model["epoch"] += 1
@@ -335,8 +333,7 @@ def learn(c, aid, model, snap, yes):
 
 def settle(aid, oid, result, value, now):
     with db(True) as c:
-        current = account(c)
-        a = c.execute("SELECT * FROM opening_accounts WHERE session=? AND id=?", (current["session"],aid)).fetchone()
+        a = c.execute("SELECT * FROM opening_accounts WHERE id=?", (aid,)).fetchone()
         r = c.execute("SELECT * FROM observations WHERE id=? AND account=? AND result IS NULL",(oid,aid)).fetchone()
         if a is None or not r:
             return
@@ -346,6 +343,10 @@ def settle(aid, oid, result, value, now):
             payout = order["n"] * (value if order["side"]=="YES" else 1-value)
         pnl = round(payout-order["paid"],6) if order else None
         c.execute("UPDATE observations SET settled=?,result=?,pnl=? WHERE id=?",(now,result,pnl,oid))
+        if a["rule"] != ENTRY_RULE:
+            # Settle any pre-upgrade fill against its retired ledger only.
+            c.execute("UPDATE opening_accounts SET cash=cash+? WHERE id=?", (payout, aid))
+            return
         model = json.loads(a["model"])
         snap = json.loads(r["snap"])
         if result in ("YES","NO") and snap.get("family") == model["family"] and "x" in snap:
@@ -359,8 +360,11 @@ def cycle():
         a = account(c)
         aid = a["id"]
         c.execute("UPDATE opening_accounts SET heartbeat=? WHERE id=?",(now,aid))
-        due = c.execute("""SELECT id,account,ticker FROM observations WHERE account IN (SELECT id FROM opening_accounts WHERE session=?)
-                           AND result IS NULL AND close<=? ORDER BY close,id""",(a["session"],now)).fetchall()
+        due = c.execute("""SELECT o.id,o.account,o.ticker FROM observations o
+                           JOIN opening_accounts a ON a.id=o.account
+                           WHERE o.result IS NULL AND o.close<=? AND
+                                 (o.account=? OR (a.rule<>? AND o.actual IS NOT NULL))
+                           ORDER BY o.close,o.id""", (now, aid, ENTRY_RULE)).fetchall()
     by_ticker = {}
     for row in due:
         by_ticker.setdefault(row["ticker"], []).append(row)

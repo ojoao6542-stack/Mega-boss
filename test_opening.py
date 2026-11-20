@@ -230,7 +230,7 @@ class PaperTest(unittest.TestCase):
             self.assertEqual(row["opened"],close-700)
             snap=json.loads(row["snap"])
             self.assertEqual(snap["base"],.9)
-            self.assertEqual(snap["base_order"]["confidence"],.9)
+            self.assertEqual(snap["active_order"]["confidence"],.9)
         e.settle(1,row["id"],"YES",1,close)
         self.assertEqual(app.snapshot()["seen"],1)
 
@@ -325,10 +325,10 @@ class PaperTest(unittest.TestCase):
         after=app.snapshot()
         self.assertEqual(after["all"]["count"],1)
         self.assertEqual(after["cash"],before["cash"])
-        self.assertEqual(after["comparison"]["opening"], after["comparison"]["v5"])
+        self.assertNotIn("comparison", after)
         self.assertEqual(settlement_requests, [e.API + "/markets/" + self.market["ticker"]])
 
-    def test_paired_entry_window_edge_settlement_pause_and_restart(self):
+    def test_single_entry_window_settlement_pause_and_restart(self):
         def scan(ticker, seconds):
             with patch.object(e,"chart_signal",return_value=(.65,[1,0,0,0,0])):
                 e.record(1, dict(self.market,ticker=ticker), self.now+seconds, 100,
@@ -337,30 +337,67 @@ class PaperTest(unittest.TestCase):
         scan("early", 601)
         scan("boundary", 600)
         scan("too-late", 60)
-        comp = app.snapshot()["comparison"]
-        self.assertEqual((comp["opening"]["open"], comp["v5"]["open"]), (1, 2))
+        self.assertEqual(app.snapshot()["open_count"], 1)
         self.assertEqual(app.control("pause",1), (200, "Saved"))
         scan("paused", 800)
         with e.db() as c:
             pending = list(c.execute("SELECT id,account,ticker FROM observations ORDER BY id"))
-        self.assertEqual(len(pending), 4)
+        self.assertEqual(len(pending), 2)
         for row in pending:
             won = int(row["ticker"] == "early")
             e.settle(row["account"], row["id"], "YES" if won else "NO", won, self.now)
             e.settle(row["account"], row["id"], "YES" if won else "NO", won, self.now)
         e.init()
-        comp = app.snapshot()["comparison"]
-        self.assertEqual(comp["opening"]["net"], 20)
-        self.assertEqual(comp["v5"]["net"], 0)
-        self.assertEqual(comp["v5"]["drawdown"], 20)
+        self.assertEqual(app.snapshot()["all"]["net"], 20)
         self.assertEqual(app.control("reset",1)[0], 200)
         new = app.snapshot()
         self.assertEqual(new["session"], 2)
-        self.assertEqual(new["comparison"]["opening"]["count"], 0)
-        self.assertEqual(new["comparison"]["v5"]["count"], 0)
+        self.assertEqual(new["all"]["count"], 0)
         scan("stale session", 800)
         with e.db() as c:
-            self.assertEqual(c.execute("SELECT COUNT(*) FROM observations").fetchone()[0], 4)
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM observations").fetchone()[0], 2)
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM opening_accounts").fetchone()[0], 2)
+
+    def test_upgrade_keeps_opening_history_and_retires_old_account(self):
+        self.book()
+        e.settle(1, 1, "YES", 1, self.now)
+        before = app.snapshot()
+        with e.db(True) as c:
+            c.execute("UPDATE opening_accounts SET model=json_set(model, '$.active_name', 'V5 chart forecast') WHERE id=1")
+            legacy_model = json.dumps(e.initial())
+            old_id = c.execute("INSERT INTO opening_accounts(session,rule,model,cash) VALUES(1,?,?,480)",
+                               ("V5 full window, 50-cent floor", legacy_model)).lastrowid
+            c.execute("""INSERT INTO observations(account,ticker,opened,close,snap,actual)
+                         SELECT ?, 'OLD-FILL', opened, ?,snap,actual FROM observations WHERE id=1""",
+                      (old_id, self.now-1))
+        e.init()
+        after = app.snapshot()
+        for field in ("session", "seen", "cash", "recent", "equity", "target"):
+            self.assertEqual(before[field], after[field])
+        self.assertEqual(after["active"], "Opening Five chart forecast")
+        self.assertEqual(app.control("pause", 1)[0], 200)
+        self.assertEqual(app.control("resume", 1)[0], 200)
+        e.record(1, dict(self.market,ticker="new-only"), self.now+750, 100, self.now, self.chart(self.now))
+        with e.db(True) as c:
+            self.assertEqual(c.execute("SELECT account FROM observations WHERE ticker='new-only'").fetchall()[0][0],1)
+            orders = list(c.execute("SELECT id FROM observations WHERE account=?", (old_id,)))
+            self.assertEqual(len(orders), 1)
+            self.assertEqual(c.execute("SELECT enabled FROM opening_accounts WHERE id=?", (old_id,)).fetchone()[0],0)
+            current_trade = c.execute("SELECT id FROM observations WHERE ticker='new-only'").fetchone()[0]
+        e.settle(1, current_trade, "NO", 0, self.now)
+        self.assertEqual(app.control("reset",1)[0], 200)
+        fresh = app.snapshot()
+        app.control("pause", fresh["account"])
+        with patch.object(e, "get", return_value={"market":{"result":"yes","status":"finalized"}}), \
+                patch.object(e,"latest_tick", return_value=(100, self.now)):
+            e.cycle()
+            e.cycle()
+        with e.db() as c:
+            retired = c.execute("SELECT * FROM opening_accounts WHERE id=?", (old_id,)).fetchone()
+            self.assertEqual(retired["cash"], 520)
+            self.assertEqual(retired["model"], legacy_model)
+        self.assertEqual(app.snapshot()["cash"], 500)
+        self.assertEqual(app.snapshot()["all"]["count"], 0)
 
     def test_dashboard_http(self):
         self.enterContext(patch.dict(os.environ,DASHBOARD_PASSWORD="unit-test-secret"))
@@ -400,9 +437,12 @@ class PaperTest(unittest.TestCase):
         self.assertEqual(page.status,401)
         page.read()
         headers={"Authorization":"Basic "+base64.b64encode(b"joao:unit-test-secret").decode()}
-        for path,marker in (("/","Bitcoin Opening Five"),("/state",'"cash": 500'),("/trades.csv","contracts"),("/v5-reference.csv","entry_rule")):
+        for path,marker in (("/","Bitcoin Opening Five"),("/state",'"cash": 500'),("/trades.csv","contracts")):
             with urlopen(Request(url+path,headers=headers)) as response:
                 self.assertIn(marker,response.read().decode())
+        with self.assertRaises(HTTPError) as exc:
+            urlopen(Request(url+"/v5-reference.csv", headers=headers))
+        self.assertEqual(exc.exception.code, 404)
         h=dict(headers,**{"X-Opening5-Control":"1"})
         with urlopen(Request(url+"/control",headers=h,data=b'{"action":"pause","account":1}')) as response:
             self.assertEqual(response.status,200)
